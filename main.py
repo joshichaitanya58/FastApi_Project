@@ -79,26 +79,47 @@ class JSONBookStorage:
     def __init__(self, filepath: str):
         self.filepath = filepath
         self._lock = Lock()
-        self._ensure_file_exists()
+        self._ensure_writable_file()
 
-    def _ensure_file_exists(self):
+    def _ensure_writable_file(self):
         if not os.path.exists(self.filepath) or os.path.getsize(self.filepath) == 0:
             logger.info("Initializing %s with seed data", self.filepath)
-            self._save_raw(INITIAL_SEED_DATA)
+            try:
+                self._save_raw(INITIAL_SEED_DATA, target_path=self.filepath)
+            except (OSError, PermissionError):
+                tmp_path = os.path.join("/tmp", "books.json")
+                logger.warning("Read-only filesystem detected. Switching storage path to %s", tmp_path)
+                self.filepath = tmp_path
+                if not os.path.exists(self.filepath):
+                    self._save_raw(INITIAL_SEED_DATA, target_path=self.filepath)
 
     def _load_raw(self) -> List[Dict[str, Any]]:
         try:
             with open(self.filepath, "r", encoding="utf-8") as f:
                 return json.load(f)
         except (json.JSONDecodeError, FileNotFoundError):
-            logger.warning("Error reading JSON file, re-initializing seed data.")
+            if self.filepath != DB_FILE and os.path.exists(DB_FILE):
+                try:
+                    with open(DB_FILE, "r", encoding="utf-8") as f:
+                        return json.load(f)
+                except Exception:
+                    pass
             return INITIAL_SEED_DATA
 
-    def _save_raw(self, data: List[Dict[str, Any]]) -> None:
-        temp_file = f"{self.filepath}.tmp"
-        with open(temp_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        os.replace(temp_file, self.filepath)
+    def _save_raw(self, data: List[Dict[str, Any]], target_path: Optional[str] = None) -> None:
+        dest = target_path or self.filepath
+        try:
+            dirname = os.path.dirname(dest) or "."
+            temp_file = os.path.join(dirname, f"temp_{os.path.basename(dest)}")
+            with open(temp_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            os.replace(temp_file, dest)
+        except (OSError, PermissionError):
+            if dest != os.path.join("/tmp", "books.json"):
+                self.filepath = os.path.join("/tmp", "books.json")
+                self._save_raw(data, target_path=self.filepath)
+            else:
+                raise
 
     def get_all(self) -> List[Dict[str, Any]]:
         with self._lock:
